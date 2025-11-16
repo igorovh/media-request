@@ -3,6 +3,8 @@ import { prisma } from "./prisma"
 import { encrypt } from "./encryption"
 
 export const authOptions = {
+  // Trust the host - required for production deployments behind proxies
+  trustHost: true,
   providers: [
     TwitchProvider({
       clientId: process.env.TWITCH_CLIENT_ID!,

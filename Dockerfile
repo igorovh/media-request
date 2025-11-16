@@ -51,7 +51,6 @@ RUN apk add --no-cache openssl
 # Next.js standalone output includes everything needed, but we need to ensure Prisma files are available
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
-COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 
 # Copy Prisma files for migrations at runtime (if needed)
 COPY --from=builder --chown=nextjs:nodejs /app/prisma ./prisma
