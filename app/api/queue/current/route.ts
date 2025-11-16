@@ -3,6 +3,8 @@ import { auth } from "@/lib/auth-utils"
 import { prisma } from "@/lib/prisma"
 import { getDirectVideoUrl, isValidYouTubeUrl } from "@/lib/video-scraper"
 
+export const dynamic = 'force-dynamic'
+
 export async function GET(request: NextRequest) {
   try {
     const session = await auth()

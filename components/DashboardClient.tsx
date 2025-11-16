@@ -351,7 +351,7 @@ export default function DashboardClient({ user }: DashboardClientProps) {
       setConnecting(false)
       alert("Failed to connect bot. Please try again.")
     }
-  }, [botConnected, user.id, user.username, fetchRequests])
+  }, [botConnected, user.id, user.username, user.playerToken, fetchRequests])
 
   const handleCopyUrl = () => {
     navigator.clipboard.writeText(playerUrl)
@@ -706,7 +706,7 @@ export default function DashboardClient({ user }: DashboardClientProps) {
     } catch (error) {
       console.error("Error skipping current video:", error)
     }
-  }, [currentPlaying, fetchRequests])
+  }, [currentPlaying, extractionError, fetchRequests])
   
   // Update ref whenever handleSkipCurrent changes
   useEffect(() => {

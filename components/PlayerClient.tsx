@@ -561,7 +561,7 @@ export default function PlayerClient({ streamerId }: PlayerClientProps) {
     return () => clearInterval(interval)
   }, [currentRequest])
 
-  const handleVideoEnd = async () => {
+  const handleVideoEnd = useCallback(async () => {
     if (currentRequest) {
       const videoIdToDelete = currentRequest.id
       
@@ -619,7 +619,7 @@ export default function PlayerClient({ streamerId }: PlayerClientProps) {
         }
       }, 300)
     }
-  }
+  }, [currentRequest])
 
   const togglePlayPause = useCallback(() => {
     setIsPlaying((prev) => {
@@ -693,7 +693,7 @@ export default function PlayerClient({ streamerId }: PlayerClientProps) {
         video.removeEventListener("ended", handleEnd)
       }
     }
-  }, [currentRequest, isPlaying])
+  }, [currentRequest, isPlaying, handleVideoEnd])
 
   // Ensure ReactPlayer plays when URL changes and update volume
   useEffect(() => {

@@ -25,7 +25,7 @@ export default async function DashboardPage() {
             Access Denied
           </h1>
           <p className="text-text-gray mb-6">
-            You don't have access to the dashboard.
+            You don&apos;t have access to the dashboard.
           </p>
           <div className="space-y-3">
             <p className="text-text-light text-sm">
