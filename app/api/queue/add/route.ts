@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
-import { isValidVideoUrl, getPlayerType } from "@/lib/video-scraper"
+import { isValidVideoUrl, getPlayerType, isValidTikTokUrl, validateTikTokUrl } from "@/lib/video-scraper"
 import { z } from "zod"
 
 const addRequestSchema = z.object({
@@ -29,9 +29,20 @@ export async function POST(request: NextRequest) {
     // Validate URL is from a whitelisted service
     if (!isValidVideoUrl(url)) {
       return NextResponse.json(
-        { error: "Video source not supported. Supported services: YouTube, Streamable, Twitch, Twitter, Nuuls, Instagram Reels, TikTok" },
+        { error: "Video source not supported. Supported services: YouTube, TikTok, Streamable" },
         { status: 400 }
       )
+    }
+
+    // For TikTok URLs, validate that they resolve to a proper video URL with ID
+    if (isValidTikTokUrl(url)) {
+      const isValid = await validateTikTokUrl(url)
+      if (!isValid) {
+        return NextResponse.json(
+          { error: "Invalid TikTok URL. The URL must resolve to a valid video." },
+          { status: 400 }
+        )
+      }
     }
 
     // Determine player type

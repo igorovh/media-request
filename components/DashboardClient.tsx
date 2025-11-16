@@ -26,17 +26,24 @@ export default function DashboardClient({ user }: DashboardClientProps) {
   const [videoTitle, setVideoTitle] = useState<string | null>(null)
   const [isSeeking, setIsSeeking] = useState(false)
   const [seekPosition, setSeekPosition] = useState<number | null>(null)
+  const [extractionError, setExtractionError] = useState<string | null>(null)
+  const [autoSkipCountdown, setAutoSkipCountdown] = useState<number | null>(null)
   const seekTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const volumeDebounceRef = useRef<NodeJS.Timeout | null>(null)
+  const autoSkipIntervalRef = useRef<NodeJS.Timeout | null>(null)
+  const handleSkipCurrentRef = useRef<(() => Promise<void>) | null>(null)
   const { requests, fetchRequests, skipRequest, removeRequest } = useQueueStore()
 
   const [playerUrl, setPlayerUrl] = useState("")
 
-  // Cleanup debounce timeout on unmount
+  // Cleanup debounce timeout and countdown interval on unmount
   useEffect(() => {
     return () => {
       if (volumeDebounceRef.current) {
         clearTimeout(volumeDebounceRef.current)
+      }
+      if (autoSkipIntervalRef.current) {
+        clearInterval(autoSkipIntervalRef.current)
       }
     }
   }, [])
@@ -66,17 +73,95 @@ export default function DashboardClient({ user }: DashboardClientProps) {
               originalUrl: data.currentRequest.originalUrl,
               requestedBy: data.currentRequest.requestedBy,
             })
+            // Clear any extraction error when we get a valid video
+            setExtractionError(null)
+            setAutoSkipCountdown(null)
+            if (autoSkipIntervalRef.current) {
+              clearInterval(autoSkipIntervalRef.current)
+              autoSkipIntervalRef.current = null
+            }
           } else {
             setCurrentPlaying(null)
+            setExtractionError(null)
+            setAutoSkipCountdown(null)
+          }
+        } else {
+          // Check if it's an extraction error
+          const errorData = await response.json().catch(() => ({}))
+          if (errorData.error && errorData.error.includes("Failed to extract video URL")) {
+            // The video is still marked as PLAYING in the database, so we can get its info
+            try {
+              // Fetch from the list to get video info
+              const listResponse = await fetch("/api/queue/list")
+              if (listResponse.ok) {
+                const listData = await listResponse.json()
+                const playingVideo = listData.requests.find((r: any) => r.status === "PLAYING")
+                if (playingVideo) {
+                  // Set current playing with the video info we have
+                  setCurrentPlaying({
+                    id: playingVideo.id,
+                    originalUrl: playingVideo.originalUrl,
+                    requestedBy: playingVideo.requestedBy,
+                  })
+                }
+              }
+            } catch (e) {
+              console.error("Error fetching video info:", e)
+            }
+            
+            // Set error message
+            setExtractionError(errorData.error)
+            
+            // Only start countdown if one isn't already running
+            if (!autoSkipIntervalRef.current) {
+              // Set initial countdown value
+              setAutoSkipCountdown(10)
+              
+              // Start countdown interval
+              autoSkipIntervalRef.current = setInterval(() => {
+                setAutoSkipCountdown((prev) => {
+                  if (prev === null || prev === undefined) {
+                    return null
+                  }
+                  if (prev <= 1) {
+                    // Auto-skip when countdown reaches 0
+                    if (autoSkipIntervalRef.current) {
+                      clearInterval(autoSkipIntervalRef.current)
+                      autoSkipIntervalRef.current = null
+                    }
+                    // Trigger skip
+                    if (handleSkipCurrentRef.current) {
+                      handleSkipCurrentRef.current()
+                    }
+                    return null
+                  }
+                  return prev - 1
+                })
+              }, 1000)
+            }
+            // If countdown is already running, don't reset it - just keep the error message
+          } else {
+            // Other error, clear current playing
+            setCurrentPlaying(null)
+            setExtractionError(null)
+            setAutoSkipCountdown(null)
           }
         }
       } catch (error) {
         console.error("Error fetching current playing:", error)
+        setCurrentPlaying(null)
+        setExtractionError(null)
+        setAutoSkipCountdown(null)
       }
     }
     fetchCurrentPlaying()
     const interval = setInterval(fetchCurrentPlaying, 5000)
-    return () => clearInterval(interval)
+    return () => {
+      clearInterval(interval)
+      if (autoSkipIntervalRef.current) {
+        clearInterval(autoSkipIntervalRef.current)
+      }
+    }
   }, [])
 
   // Fetch video position (current time, duration, title) periodically
@@ -203,8 +288,46 @@ export default function DashboardClient({ user }: DashboardClientProps) {
             }
           } else if (command === "skip") {
             // Handle skip command: !mrskip
-            if (currentPlaying) {
-              await handleSkipCurrent()
+            // Fetch current playing video directly from API to avoid stale closure
+            try {
+              const response = await fetch("/api/queue/current")
+              if (response.ok) {
+                const data = await response.json()
+                if (data.currentRequest) {
+                  // Skip the current video
+                  await fetch("/api/queue/skip", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ id: data.currentRequest.id }),
+                  })
+                  
+                  // Refresh the queue and current playing
+                  fetchRequests()
+                  
+                  // Fetch new current playing after a delay
+                  setTimeout(async () => {
+                    try {
+                      const newResponse = await fetch("/api/queue/current")
+                      if (newResponse.ok) {
+                        const newData = await newResponse.json()
+                        if (newData.currentRequest) {
+                          setCurrentPlaying({
+                            id: newData.currentRequest.id,
+                            originalUrl: newData.currentRequest.originalUrl,
+                            requestedBy: newData.currentRequest.requestedBy,
+                          })
+                        } else {
+                          setCurrentPlaying(null)
+                        }
+                      }
+                    } catch (error) {
+                      console.error("Error fetching current playing after skip:", error)
+                    }
+                  }, 300)
+                }
+              }
+            } catch (error) {
+              console.error("Error handling skip command:", error)
             }
           }
         } catch (error) {
@@ -409,15 +532,71 @@ export default function DashboardClient({ user }: DashboardClientProps) {
     return `${mins}:${secs.toString().padStart(2, "0")}`
   }
 
-  const handleSkipCurrent = async () => {
-    if (!currentPlaying) return
-    
+  const handleSkipCurrent = useCallback(async () => {
+    console.log("🔄 handleSkipCurrent called", { currentPlaying, extractionError })
     try {
-      await fetch("/api/queue/skip", {
+      // Clear extraction error and countdown when skipping
+      setExtractionError(null)
+      setAutoSkipCountdown(null)
+      if (autoSkipIntervalRef.current) {
+        clearInterval(autoSkipIntervalRef.current)
+        autoSkipIntervalRef.current = null
+      }
+      
+      // First, get the video ID - try currentPlaying first, then fallback to list
+      let videoId: string | null = null
+      
+      if (currentPlaying?.id) {
+        // Use the ID from state if available
+        videoId = currentPlaying.id
+        console.log("✅ Using videoId from currentPlaying:", videoId)
+      }
+      
+      // If we don't have a videoId yet, try to get from the queue list (now includes PLAYING videos)
+      if (!videoId) {
+        try {
+          console.log("📋 Fetching queue list to find PLAYING video...")
+          const listResponse = await fetch("/api/queue/list")
+          if (listResponse.ok) {
+            const listData = await listResponse.json()
+            const playingVideo = listData.requests.find((r: any) => r.status === "PLAYING")
+            if (playingVideo) {
+              videoId = playingVideo.id
+              console.log("✅ Found videoId from list:", videoId)
+            } else {
+              console.warn("⚠️ No PLAYING video found in list")
+            }
+          } else {
+            console.error("❌ Failed to fetch queue list:", listResponse.status)
+          }
+        } catch (error) {
+          console.error("❌ Error fetching queue list:", error)
+        }
+      }
+      
+      // If we still don't have a video ID, there's nothing to skip
+      if (!videoId) {
+        console.warn("⚠️ No video to skip - videoId is null")
+        alert("No video found to skip. The video may have already been removed.")
+        return
+      }
+      
+      console.log("🚀 Calling skip endpoint with videoId:", videoId)
+      // Skip the video - delete it from database
+      const skipResponse = await fetch("/api/queue/skip", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: currentPlaying.id }),
+        body: JSON.stringify({ id: videoId }),
       })
+      
+      console.log("📡 Skip response:", skipResponse.status, skipResponse.ok)
+      
+      if (!skipResponse.ok) {
+        const errorData = await skipResponse.json().catch(() => ({}))
+        console.error("Failed to skip video:", errorData.error || "Unknown error")
+        alert(`Failed to skip video: ${errorData.error || "Unknown error"}`)
+        return
+      }
       
       // Immediately clear current playing
       setCurrentPlaying(null)
@@ -437,12 +616,86 @@ export default function DashboardClient({ user }: DashboardClientProps) {
                 originalUrl: data.currentRequest.originalUrl,
                 requestedBy: data.currentRequest.requestedBy,
               })
+              // Clear any extraction error when we get a valid video
+              setExtractionError(null)
+              setAutoSkipCountdown(null)
+              if (autoSkipIntervalRef.current) {
+                clearInterval(autoSkipIntervalRef.current)
+                autoSkipIntervalRef.current = null
+              }
             } else {
               setCurrentPlaying(null)
+              setExtractionError(null)
+              setAutoSkipCountdown(null)
+            }
+          } else {
+            // If we get an error (e.g., URL extraction failed), show error and start countdown
+            const errorData = await response.json().catch(() => ({}))
+            if (errorData.error && errorData.error.includes("Failed to extract video URL")) {
+              // The video is still marked as PLAYING in the database, so we can get its info
+              // Try to get the current playing video info (without processedUrl)
+              try {
+                // Fetch from the list to get video info
+                const listResponse = await fetch("/api/queue/list")
+                if (listResponse.ok) {
+                  const listData = await listResponse.json()
+                  const playingVideo = listData.requests.find((r: any) => r.status === "PLAYING")
+                  if (playingVideo) {
+                    // Set current playing with the video info we have
+                    setCurrentPlaying({
+                      id: playingVideo.id,
+                      originalUrl: playingVideo.originalUrl,
+                      requestedBy: playingVideo.requestedBy,
+                    })
+                  }
+                }
+              } catch (e) {
+                console.error("Error fetching video info:", e)
+              }
+              
+              // Set error message
+              setExtractionError(errorData.error)
+              
+              // Only start countdown if one isn't already running
+              if (!autoSkipIntervalRef.current) {
+                // Set initial countdown value
+                setAutoSkipCountdown(10)
+                
+                // Start countdown interval
+                autoSkipIntervalRef.current = setInterval(() => {
+                  setAutoSkipCountdown((prev) => {
+                    if (prev === null || prev === undefined) {
+                      return null
+                    }
+                    if (prev <= 1) {
+                      // Auto-skip when countdown reaches 0
+                      if (autoSkipIntervalRef.current) {
+                        clearInterval(autoSkipIntervalRef.current)
+                        autoSkipIntervalRef.current = null
+                      }
+                      // Trigger skip
+                      if (handleSkipCurrentRef.current) {
+                        handleSkipCurrentRef.current()
+                      }
+                      return null
+                    }
+                    return prev - 1
+                  })
+                }, 1000)
+              }
+              // If countdown is already running, don't reset it - just keep the error message
+            } else {
+              // Other error, just clear current playing
+              setCurrentPlaying(null)
+              setExtractionError(null)
+              setAutoSkipCountdown(null)
             }
           }
         } catch (error) {
           console.error("Error fetching current playing:", error)
+          setCurrentPlaying(null)
+          setExtractionError(null)
+          setAutoSkipCountdown(null)
         }
       }
       
@@ -453,12 +706,17 @@ export default function DashboardClient({ user }: DashboardClientProps) {
     } catch (error) {
       console.error("Error skipping current video:", error)
     }
-  }
+  }, [currentPlaying, fetchRequests])
+  
+  // Update ref whenever handleSkipCurrent changes
+  useEffect(() => {
+    handleSkipCurrentRef.current = handleSkipCurrent
+  }, [handleSkipCurrent])
 
   const handleClearQueue = async () => {
     // Show confirmation dialog
     const confirmed = window.confirm(
-      "Are you sure you want to clear the entire queue? This will remove all pending videos and stop the currently playing video."
+      "Are you sure you want to clear the queue? This will remove all pending videos but keep the currently playing video."
     )
     
     if (!confirmed) {
@@ -472,9 +730,8 @@ export default function DashboardClient({ user }: DashboardClientProps) {
       })
       
       if (response.ok) {
-        // Clear current playing
-        setCurrentPlaying(null)
-        // Refresh the queue
+        // Don't clear currentPlaying - it should continue playing
+        // Just refresh the queue to show the updated list
         fetchRequests()
       } else {
         console.error("Failed to clear queue")
@@ -588,10 +845,40 @@ export default function DashboardClient({ user }: DashboardClientProps) {
                   </>
                 )}
               </div>
+
+              {/* Supported Services */}
+              <div className="card p-6">
+                <h2 className="text-xl font-semibold text-text-light mb-4">
+                  Supported Services
+                </h2>
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <svg className="w-5 h-5 text-red-600" fill="currentColor" viewBox="0 0 24 24">
+                      <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3 12 3s-7.505.545-9.377.05a3.017 3.017 0 0 0-2.122 2.136C.24 8.07.24 12 .24 12s0 3.93.26 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.495 9.376.05 9.376.05s7.505.445 9.377-.05a3.015 3.015 0 0 0 2.122-2.136C23.76 15.93 23.76 12 23.76 12s0-3.93-.262-5.814zM9.75 15.02V8.98l6.5 3.02-6.5 3.02z"/>
+                    </svg>
+                    <span className="text-text-light">YouTube</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <svg className="w-5 h-5 text-black dark:text-white" fill="currentColor" viewBox="0 0 24 24">
+                      <path d="M12.525.02c1.31-.02 2.61-.01 3.91-.02.08 1.53.63 3.09 1.75 4.17 1.12 1.11 2.7 1.62 4.24 1.79v4.03c-1.44-.05-2.89-.35-4.2-.97-.57-.26-1.1-.59-1.62-.93-.01 2.92.01 5.84-.02 8.75-.08 1.4-.54 2.79-1.35 3.94-1.31 1.92-3.58 3.17-5.91 3.21-1.43.08-2.86-.31-4.08-1.03-2.02-1.19-3.44-3.37-3.65-5.71-.02-.5-.03-1-.02-1.49.18-1.9 1.12-3.72 2.58-4.96 1.66-1.44 3.98-2.13 6.15-1.72.02 1.48-.04 2.96-.04 4.44-.99-.32-2.15-.23-3.02.37-.63.41-1.11 1.04-1.36 1.75-.21.51-.15 1.07.14 1.54.77 1.39 2.38 2.13 4.05 1.92 1.65-.21 3.07-1.45 3.51-3.07.1-.51.08-1.03-.04-1.53-1.34-6.88-8.43-11.25-15.42-8.5z"/>
+                    </svg>
+                    <span className="text-text-light">TikTok</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <svg className="w-5 h-5 text-blue-600" fill="currentColor" viewBox="0 0 24 24">
+                      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/>
+                    </svg>
+                    <span className="text-text-light">Streamable</span>
+                  </div>
+                </div>
+              </div>
+
             </div>
 
-            {/* Right Side: Player Controls */}
-            <div className="card p-6">
+            {/* Right Side: Player Controls and Commands */}
+            <div className="space-y-6">
+              {/* Player Controls */}
+              <div className="card p-6">
               <h2 className="text-xl font-semibold text-text-light mb-4">
                 Player Controls
               </h2>
@@ -683,8 +970,8 @@ export default function DashboardClient({ user }: DashboardClientProps) {
                 {/* Skip Current */}
                 <button
                   onClick={handleSkipCurrent}
-                  disabled={!currentPlaying}
-                  className="btn-primary disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
+                  className="btn-primary"
+                  title="Skip the currently playing video (works even if player hasn't acknowledged it)"
                 >
                   <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
                     <path d="M6 19h8v-2H6v2zM18 5h-2v2h-2v2h2v2h2V9h2V7h-2V5zM4 13h8v-2H4v2zm0-4h8V7H4v2zm0 8h8v-2H4v2z"/>
@@ -692,6 +979,30 @@ export default function DashboardClient({ user }: DashboardClientProps) {
                   Skip
                 </button>
               </div>
+
+              {/* Extraction Error Message */}
+              {extractionError && (
+                <div className="mt-4 p-4 bg-yellow-900/30 border border-yellow-700 rounded-lg">
+                  <div className="flex items-center justify-between">
+                    <div className="flex-1">
+                      <p className="text-yellow-200 text-sm font-medium mb-1">
+                        {extractionError}
+                      </p>
+                      {autoSkipCountdown !== null && (
+                        <p className="text-yellow-300 text-xs">
+                          Auto-skipping in {autoSkipCountdown} second{autoSkipCountdown !== 1 ? 's' : ''}...
+                        </p>
+                      )}
+                    </div>
+                    <button
+                      onClick={handleSkipCurrent}
+                      className="ml-4 px-3 py-1 bg-yellow-600 hover:bg-yellow-700 text-white text-sm rounded transition-colors"
+                    >
+                      Skip Now
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {/* Current Video Info */}
               {currentPlaying && (
@@ -705,6 +1016,51 @@ export default function DashboardClient({ user }: DashboardClientProps) {
                   </p>
                 </div>
               )}
+              </div>
+
+              {/* Supported Commands */}
+              <div className="card p-6">
+                <h2 className="text-xl font-semibold text-text-light mb-4">
+                  Supported Commands
+                </h2>
+                <div className="space-y-3">
+                  <div>
+                    <div className="flex items-center gap-2 mb-1">
+                      <code className="bg-bg-secondary px-2 py-1 rounded text-sm font-mono text-text-light">!mr [url]</code>
+                      <span className="text-xs text-text-gray">(Everyone)</span>
+                    </div>
+                    <p className="text-text-gray text-xs ml-1">Add a video to the queue</p>
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2 mb-1">
+                      <code className="bg-bg-secondary px-2 py-1 rounded text-sm font-mono text-text-light">!mrpause</code>
+                      <span className="text-xs text-primary-light">(Mod/Broadcaster)</span>
+                    </div>
+                    <p className="text-text-gray text-xs ml-1">Pause the current video</p>
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2 mb-1">
+                      <code className="bg-bg-secondary px-2 py-1 rounded text-sm font-mono text-text-light">!mrplay</code>
+                      <span className="text-xs text-primary-light">(Mod/Broadcaster)</span>
+                    </div>
+                    <p className="text-text-gray text-xs ml-1">Resume the current video</p>
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2 mb-1">
+                      <code className="bg-bg-secondary px-2 py-1 rounded text-sm font-mono text-text-light">!mrvol [0-100]</code>
+                      <span className="text-xs text-primary-light">(Mod/Broadcaster)</span>
+                    </div>
+                    <p className="text-text-gray text-xs ml-1">Set player volume (0-100)</p>
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2 mb-1">
+                      <code className="bg-bg-secondary px-2 py-1 rounded text-sm font-mono text-text-light">!mrskip</code>
+                      <span className="text-xs text-primary-light">(Mod/Broadcaster)</span>
+                    </div>
+                    <p className="text-text-gray text-xs ml-1">Skip the current video</p>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
 

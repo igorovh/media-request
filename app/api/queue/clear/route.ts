@@ -13,22 +13,27 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Delete all media requests for this streamer (except currently playing)
-    // First, mark any currently playing video as PLAYED
-    await prisma.mediaRequest.updateMany({
+    // Delete all media requests for this streamer EXCEPT the currently playing one
+    // Get the currently playing video ID first
+    const currentlyPlaying = await prisma.mediaRequest.findFirst({
       where: {
         streamerId: session.user.id,
         status: "PLAYING",
       },
-      data: {
-        status: "PLAYED",
+      select: {
+        id: true,
       },
     })
 
-    // Then delete all requests (PENDING and PLAYED)
+    // Delete all requests except the currently playing one
     await prisma.mediaRequest.deleteMany({
       where: {
         streamerId: session.user.id,
+        ...(currentlyPlaying ? {
+          NOT: {
+            id: currentlyPlaying.id,
+          },
+        } : {}),
       },
     })
 

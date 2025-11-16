@@ -40,22 +40,11 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // If this is the currently playing video, mark it as PLAYED first
-    // This will cause the player to stop and move to the next video
-    // The player polls for PLAYING videos, so marking as PLAYED will make it stop
-    if (mediaRequest.status === "PLAYING") {
-      await prisma.mediaRequest.update({
-        where: { id },
-        data: { status: "PLAYED" },
-      })
-      // Don't delete immediately - let the player detect the status change first
-      // The video will be cleaned up later or can be deleted in a separate cleanup job
-    } else {
-      // Not currently playing, just delete it
-      await prisma.mediaRequest.delete({
-        where: { id },
-      })
-    }
+    // Delete the video immediately (whether it's PLAYING or not)
+    // This ensures videos with extraction errors are removed from the database
+    await prisma.mediaRequest.delete({
+      where: { id },
+    })
 
     return NextResponse.json({ success: true })
   } catch (error) {

@@ -61,7 +61,7 @@ export async function GET(request: NextRequest) {
       if (directUrl) {
         processedUrl = directUrl
       } else {
-        // If we can't extract the URL, return error
+        // If we can't extract the URL, return error (don't auto-skip)
         return NextResponse.json(
           { error: "Failed to extract video URL. The video may be unavailable or expired." },
           { status: 500 }

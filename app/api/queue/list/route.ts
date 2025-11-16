@@ -13,11 +13,13 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    // Get all PENDING requests for this streamer
+    // Get all PENDING and PLAYING requests for this streamer
     const requests = await prisma.mediaRequest.findMany({
       where: {
         streamerId: session.user.id,
-        status: "PENDING",
+        status: {
+          in: ["PENDING", "PLAYING"],
+        },
       },
       orderBy: {
         createdAt: "asc",
@@ -27,6 +29,7 @@ export async function GET(request: NextRequest) {
         originalUrl: true,
         requestedBy: true,
         createdAt: true,
+        status: true,
       },
     })
 
