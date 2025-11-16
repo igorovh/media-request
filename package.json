@@ -1,0 +1,41 @@
+{
+  "name": "media-request",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "db:push": "prisma db push",
+    "db:generate": "prisma generate",
+    "db:studio": "prisma studio"
+  },
+  "dependencies": {
+    "next": "^14.2.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "next-auth": "^5.0.0-beta.25",
+    "@prisma/client": "^5.19.0",
+    "prisma": "^5.19.0",
+    "tmi.js": "^1.8.5",
+    "react-player": "^2.16.0",
+    "youtube-dl-exec": "^2.4.8",
+    "zustand": "^4.5.5",
+    "zod": "^3.23.8",
+    "bcryptjs": "^2.4.3",
+    "@types/bcryptjs": "^2.4.6"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "typescript": "^5.5.0",
+    "tailwindcss": "^3.4.0",
+    "postcss": "^8.4.38",
+    "autoprefixer": "^10.4.19",
+    "eslint": "^8.57.0",
+    "eslint-config-next": "^14.2.0"
+  }
+}
+
