@@ -1,9 +1,8 @@
-import { NextAuthOptions } from "next-auth"
 import TwitchProvider from "next-auth/providers/twitch"
 import { prisma } from "./prisma"
 import { encrypt } from "./encryption"
 
-export const authOptions: NextAuthOptions = {
+export const authOptions = {
   providers: [
     TwitchProvider({
       clientId: process.env.TWITCH_CLIENT_ID!,
@@ -16,7 +15,7 @@ export const authOptions: NextAuthOptions = {
     }),
   ],
   callbacks: {
-    async signIn({ user, account, profile }) {
+    async signIn({ user, account, profile }: any) {
       if (!account || !profile) return false
 
       try {
@@ -28,7 +27,7 @@ export const authOptions: NextAuthOptions = {
         const encryptedRefreshToken = encrypt(account.refresh_token || "")
 
         // Upsert user
-        const user = await prisma.user.upsert({
+        const dbUser = await prisma.user.upsert({
           where: { twitchId },
           update: {
             username,
@@ -47,13 +46,13 @@ export const authOptions: NextAuthOptions = {
         })
 
         // If playerToken is missing (shouldn't happen with default, but safety check)
-        if (!user.playerToken) {
+        if (!dbUser.playerToken) {
           const { randomBytes } = await import("crypto")
           const timestamp = Date.now().toString(36)
           const random = randomBytes(16).toString("hex")
           const newToken = `cl${timestamp}${random}`
           await prisma.user.update({
-            where: { id: user.id },
+            where: { id: dbUser.id },
             data: { playerToken: newToken },
           })
         }
@@ -64,7 +63,7 @@ export const authOptions: NextAuthOptions = {
         return false
       }
     },
-    async session({ session, token }) {
+    async session({ session, token }: any) {
       if (session.user && token.sub) {
         const user = await prisma.user.findUnique({
           where: { twitchId: token.sub },
@@ -79,7 +78,7 @@ export const authOptions: NextAuthOptions = {
       }
       return session
     },
-    async jwt({ token, account, profile }) {
+    async jwt({ token, account, profile }: any) {
       if (account && profile) {
         token.sub = profile.sub || account.providerAccountId
       }

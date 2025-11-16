@@ -1,4 +1,19 @@
-import { exec } from "youtube-dl-exec"
+import { exec as execChild } from "child_process"
+import { promisify } from "util"
+
+const execAsync = promisify(execChild)
+
+function getYtDlpCommand(): string {
+  // Get yt-dlp path from environment variable
+  const ytDlpPath = process.env.YOUTUBE_DL_EXEC?.trim().replace(/^["']|["']$/g, '')
+  
+  if (ytDlpPath) {
+    return ytDlpPath
+  }
+  
+  // Fallback to system yt-dlp if in PATH
+  return "yt-dlp"
+}
 
 export async function getDirectVideoUrl(url: string): Promise<string | null> {
   try {
@@ -7,14 +22,68 @@ export async function getDirectVideoUrl(url: string): Promise<string | null> {
       return url
     }
 
-    // For other platforms, try to extract direct MP4 URL
-    const info = await exec(url, {
-      dumpSingleJson: true,
-      noCheckCertificates: true,
-      noWarnings: true,
-      preferFreeFormats: true,
-      addHeader: ["referer:youtube.com", "user-agent:googlebot"],
-    })
+    const ytDlpCommand = getYtDlpCommand()
+    console.log('Using yt-dlp command:', ytDlpCommand)
+
+    // Build yt-dlp command arguments
+    const args = [
+      url,
+      "--dump-single-json",
+      "--no-check-certificates",
+      "--no-warnings",
+      "--prefer-free-formats",
+      "--add-header", "referer:youtube.com",
+      "--add-header", "user-agent:googlebot",
+    ]
+
+    // Execute yt-dlp directly using execFile for better Windows support
+    // Use execAsync with proper argument handling
+    const command = process.platform === "win32" ? ytDlpCommand : ytDlpCommand
+    const fullCommand = process.platform === "win32" 
+      ? `"${command}" ${args.map(arg => `"${arg.replace(/"/g, '\\"')}"`).join(" ")}`
+      : `${command} ${args.map(arg => `"${arg.replace(/"/g, '\\"')}"`).join(" ")}`
+
+    const execOptions: any = { 
+      maxBuffer: 10 * 1024 * 1024, // 10MB buffer
+    }
+    
+    if (process.platform === "win32") {
+      execOptions.shell = true
+    }
+    
+    const { stdout, stderr } = await execAsync(fullCommand, execOptions)
+
+    const stderrStr = stderr ? (typeof stderr === 'string' ? stderr : stderr.toString()) : ''
+    
+    // Parse JSON output (ensure stdout is a string)
+    const stdoutStr = typeof stdout === 'string' ? stdout : stdout.toString()
+    
+    // Check if stdout is null or empty (yt-dlp failed)
+    if (!stdoutStr || stdoutStr.trim() === 'null' || stdoutStr.trim() === '') {
+      if (stderrStr) {
+        console.error("yt-dlp error:", stderrStr)
+      }
+      return null
+    }
+
+    // Check for errors in stderr (but allow warnings)
+    if (stderrStr && stderrStr.includes("ERROR")) {
+      console.error("yt-dlp error:", stderrStr)
+      return null
+    }
+    
+    if (stderrStr && !stderrStr.includes("WARNING") && !stderrStr.includes("ERROR")) {
+      console.warn("yt-dlp stderr:", stderrStr)
+    }
+
+    let info: any
+    try {
+      info = JSON.parse(stdoutStr)
+    } catch (parseError) {
+      console.error("Failed to parse yt-dlp JSON output:", parseError)
+      console.error("Output was:", stdoutStr)
+      return null
+    }
 
     // Try to find the best video format (prefer mp4)
     if (info.formats && Array.isArray(info.formats)) {

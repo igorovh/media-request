@@ -1,4 +1,4 @@
-import tmi from "tmi.js"
+import tmi, { Client } from "tmi.js"
 
 export interface BotMessage {
   username: string
@@ -13,7 +13,7 @@ export interface BotCommand {
 }
 
 export class TwitchBot {
-  private client: tmi.Client | null = null
+  private client: Client | null = null
   private channel: string = ""
   private broadcasterUsername: string = ""
   private onMessageCallback?: (message: BotMessage) => void
