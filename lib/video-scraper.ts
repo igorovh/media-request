@@ -144,12 +144,13 @@ export async function validateTikTokUrl(url: string): Promise<boolean> {
   }
 }
 
-// Main validation function - only supports YouTube, TikTok, and Streamable
+// Main validation function - supports YouTube, TikTok, Streamable, and Nuuls
 export function isValidVideoUrl(url: string): boolean {
   return (
     isValidYouTubeUrl(url) ||
     isValidStreamableUrl(url) ||
-    isValidTikTokUrl(url)
+    isValidTikTokUrl(url) ||
+    isValidNuulsUrl(url)
   )
 }
 
@@ -428,6 +429,8 @@ export async function getDirectVideoUrl(url: string): Promise<string | null> {
     return await scrapeStreamable(url)
   } else if (isValidTikTokUrl(url)) {
     return await scrapeTikTok(url)
+  } else if (isValidNuulsUrl(url)) {
+    return await scrapeNuuls(url)
   }
 
   return null

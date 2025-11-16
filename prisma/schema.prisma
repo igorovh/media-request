@@ -31,6 +31,7 @@ model User {
   playerToken   String         @unique @default(cuid())
   playerPaused  Boolean        @default(false)
   playerVolume  Float          @default(0.0) // 0.0 to 1.0
+  hasAccess     Boolean        @default(false)
   mediaRequests MediaRequest[]
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt

@@ -29,7 +29,7 @@ export async function POST(request: NextRequest) {
     // Validate URL is from a whitelisted service
     if (!isValidVideoUrl(url)) {
       return NextResponse.json(
-        { error: "Video source not supported. Supported services: YouTube, TikTok, Streamable" },
+        { error: "Video source not supported. Supported services: YouTube, TikTok, Streamable, Nuuls" },
         { status: 400 }
       )
     }
