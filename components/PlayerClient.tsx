@@ -29,9 +29,23 @@ export default function PlayerClient({ streamerId }: PlayerClientProps) {
   const [showControls, setShowControls] = useState(false)
   const [playerReady, setPlayerReady] = useState(false)
   const [volume, setVolume] = useState(0.0)
+  const [currentTime, setCurrentTime] = useState(0)
+  const [duration, setDuration] = useState(0)
+  const [title, setTitle] = useState<string | null>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
   const playerRef = useRef<any>(null) // ReactPlayer ref
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const positionUpdateIntervalRef = useRef<NodeJS.Timeout | null>(null)
+  const seekCheckIntervalRef = useRef<NodeJS.Timeout | null>(null)
+  // Refs to track latest values for use in callbacks
+  const durationRef = useRef(0)
+  const titleRef = useRef<string | null>(null)
+  const lastPositionUpdateRef = useRef<number>(0)
+  const lastSeekTimeRef = useRef<number | null>(null)
+  const currentTimeRef = useRef(0)
+  const playerReadyRef = useRef(false)
+  const currentRequestRef = useRef<MediaRequest | null>(null)
+  const internalPlayerRef = useRef<any>(null) // Store the YouTube internal player directly
 
   // Clean YouTube URL to extract just the video ID
   const cleanYouTubeUrl = useCallback((url: string): string => {
@@ -99,23 +113,54 @@ export default function PlayerClient({ streamerId }: PlayerClientProps) {
             setLoading(false)
             return prev
           }
+          // Different video, stop the old one first
+          if (prev) {
+            console.log("Stopping previous video before switching")
+            // Stop the previous video
+            if (playerRef.current) {
+              try {
+                const internalPlayer = internalPlayerRef.current || playerRef.current.getInternalPlayer()
+                if (internalPlayer && typeof internalPlayer.pauseVideo === "function") {
+                  internalPlayer.pauseVideo()
+                }
+              } catch (e) {
+                // Ignore errors
+              }
+            }
+            if (videoRef.current) {
+              videoRef.current.pause()
+            }
+          }
           // Different video, update
           console.log("New video, updating state:", data.currentRequest)
           setLoading(true)
           setPlayerReady(false)
           setIsPlaying(true) // Ensure playing is set to true for new video
+          currentRequestRef.current = data.currentRequest
           return data.currentRequest
         })
-        // Set loading false after a brief moment to allow video to load
-        setTimeout(() => {
-          setLoading(false)
-          setIsPlaying(true) // Force playing state
-        }, 100)
+        // Don't set loading false here - let onReady/onLoadedData handle it
       } else {
-        // No more requests - clear current video
-        console.log("No videos in queue")
+        // No more requests - clear the current video immediately
+        console.log("No videos in queue, clearing current video")
         setCurrentRequest(null)
+        currentRequestRef.current = null
         setLoading(false)
+        setIsPlaying(false)
+        // Stop the video if it's playing
+        if (playerRef.current) {
+          try {
+            const internalPlayer = internalPlayerRef.current || playerRef.current.getInternalPlayer()
+            if (internalPlayer && typeof internalPlayer.pauseVideo === "function") {
+              internalPlayer.pauseVideo()
+            }
+          } catch (e) {
+            // Ignore errors
+          }
+        }
+        if (videoRef.current) {
+          videoRef.current.pause()
+        }
       }
     } catch (error) {
       console.error("Error fetching next video:", error)
@@ -154,6 +199,317 @@ export default function PlayerClient({ streamerId }: PlayerClientProps) {
     }
     fetchInitialState()
   }, [])
+
+  // Update position periodically and check for seek requests
+  useEffect(() => {
+    if (!currentRequest) return
+
+    const token = window.location.pathname.split("/player/")[1]
+    
+    // Update position every second
+    const updatePosition = async () => {
+      try {
+        // Don't update if player isn't ready yet
+        if (currentRequest.playerType === "YOUTUBE" && !playerReady) {
+          return
+        }
+
+        let newCurrentTime = 0
+        let newDuration = 0
+        let newTitle: string | null = null
+
+        if (currentRequest.playerType === "YOUTUBE" && playerRef.current) {
+          try {
+            const internalPlayer = playerRef.current.getInternalPlayer()
+            if (internalPlayer) {
+              // Try to get current time
+              if (typeof internalPlayer.getCurrentTime === "function") {
+                try {
+                  const time = internalPlayer.getCurrentTime()
+                  if (time !== null && time !== undefined && !isNaN(time) && isFinite(time)) {
+                    newCurrentTime = time
+                  }
+                } catch (e) {
+                  console.warn("Error calling getCurrentTime:", e)
+                }
+              }
+              
+              // Try to get duration
+              if (typeof internalPlayer.getDuration === "function") {
+                try {
+                  const dur = internalPlayer.getDuration()
+                  if (dur !== null && dur !== undefined && !isNaN(dur) && isFinite(dur) && dur > 0) {
+                    newDuration = dur
+                  }
+                } catch (e) {
+                  console.warn("Error calling getDuration:", e)
+                }
+              }
+              
+              // Try to get title
+              if (typeof internalPlayer.getVideoData === "function") {
+                try {
+                  const videoData = internalPlayer.getVideoData()
+                  if (videoData && videoData.title) {
+                    newTitle = videoData.title
+                  }
+                } catch (e) {
+                  // getVideoData might throw, ignore
+                }
+              }
+            } else {
+              console.warn("YouTube internal player not available")
+            }
+          } catch (error) {
+            console.error("Error getting YouTube player position:", error)
+          }
+        } else if (currentRequest.playerType === "MP4" && videoRef.current) {
+          const video = videoRef.current
+          if (video.readyState >= 2) { // HAVE_CURRENT_DATA or better
+            newCurrentTime = video.currentTime || 0
+            if (video.duration && isFinite(video.duration) && video.duration > 0) {
+              newDuration = video.duration
+            }
+          }
+        }
+
+        // Update current time
+        // If we're seeking, check if seek has completed
+        if (lastSeekTimeRef.current !== null) {
+          const seekTarget = lastSeekTimeRef.current
+          const timeDifference = Math.abs(newCurrentTime - seekTarget)
+          if (timeDifference < 2) {
+            // Seek completed - clear the ref
+            console.log("Seek completed, clearing ref. Target:", seekTarget, "Actual:", newCurrentTime)
+            lastSeekTimeRef.current = null
+            setCurrentTime(newCurrentTime)
+          } else {
+            // Still seeking - show seek target for now, but also track actual position
+            setCurrentTime(seekTarget)
+            currentTimeRef.current = seekTarget
+          }
+        } else if (newCurrentTime >= 0) {
+          // Not seeking - update normally
+          setCurrentTime(newCurrentTime)
+          currentTimeRef.current = newCurrentTime
+        }
+        if (newDuration > 0) {
+          setDuration(newDuration)
+          durationRef.current = newDuration
+        } else if (durationRef.current > 0) {
+          // If we couldn't get duration from player but have it in ref, use ref value
+          newDuration = durationRef.current
+        }
+        if (newTitle) {
+          setTitle(newTitle)
+          titleRef.current = newTitle
+        } else if (titleRef.current) {
+          // If we couldn't get title from player but have it in ref, use ref value
+          newTitle = titleRef.current
+        }
+
+        // Send position update to API
+        // For YouTube, send even if currentTime is 0 (video might be at start)
+        // For MP4, only send if we have valid data
+        const shouldSendUpdate = currentRequest.playerType === "YOUTUBE" 
+          ? (newCurrentTime >= 0 && playerReady) // YouTube: send if we have any time value and player is ready
+          : (newCurrentTime >= 0 || newDuration > 0) // MP4: send if we have time or duration
+        
+        if (shouldSendUpdate) {
+          // Use seek target if we're seeking, otherwise use actual position
+          const timeToSend = lastSeekTimeRef.current !== null 
+            ? lastSeekTimeRef.current 
+            : newCurrentTime
+          
+          // Use ref values as fallback to ensure we always send valid duration/title if we have them
+          const positionData = {
+            token,
+            currentTime: timeToSend,
+            duration: newDuration > 0 ? newDuration : (durationRef.current || 0),
+            title: newTitle || titleRef.current,
+          }
+          console.log("Sending position update:", positionData)
+          
+          try {
+            const response = await fetch("/api/player/position", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(positionData),
+            })
+            
+            if (!response.ok) {
+              const errorData = await response.json()
+              console.error("Position update failed:", errorData)
+            } else {
+              console.log("Position update successful")
+            }
+          } catch (fetchError) {
+            console.error("Error sending position update:", fetchError)
+          }
+        } else {
+          console.log("Skipping position update - no valid data:", {
+            currentTime: newCurrentTime,
+            duration: newDuration,
+            playerType: currentRequest.playerType,
+            playerReady: currentRequest.playerType === "YOUTUBE" ? playerReady : true,
+          })
+        }
+      } catch (error) {
+        console.error("Error updating position:", error)
+      }
+    }
+
+    // Check for seek requests
+    const checkSeek = async () => {
+      try {
+        const response = await fetch(`/api/player/seek?token=${token}`)
+        if (response.ok) {
+          const data = await response.json()
+          if (data.seekTime !== undefined && data.seekTime !== null) {
+            console.log("🎯 Seek request received in player:", data.seekTime, "Current time:", currentTimeRef.current)
+            // Store the seek time to prevent position updates from overwriting it
+            lastSeekTimeRef.current = data.seekTime
+            
+            // Perform seek - use ref to get latest currentRequest
+            const request = currentRequestRef.current || currentRequest
+            const player = playerRef.current
+            console.log("🔍 Seek debug - currentRequest:", !!request, "playerType:", request?.playerType, "playerRef:", !!player, "playerRef type:", typeof player, "has getInternalPlayer:", typeof player?.getInternalPlayer === "function")
+            
+            // Try to get player even if ref seems null - ReactPlayer might not have set it yet
+            if (request && request.playerType === "YOUTUBE") {
+              // First try to use the stored internal player ref (most reliable)
+              if (internalPlayerRef.current) {
+                console.log("✅ Using stored internal player ref for seek")
+                performSeekDirect(internalPlayerRef.current, data.seekTime)
+              } else if (player && typeof player.getInternalPlayer === "function") {
+                // Try to get internal player from ReactPlayer ref
+                try {
+                  const internalPlayer = player.getInternalPlayer()
+                  if (internalPlayer) {
+                    internalPlayerRef.current = internalPlayer // Store it for next time
+                    console.log("✅ Got internal player from ReactPlayer ref")
+                    performSeekDirect(internalPlayer, data.seekTime)
+                  } else {
+                    console.warn("⚠️ getInternalPlayer returned null")
+                    retrySeekWithBackoff(data.seekTime)
+                  }
+                } catch (error) {
+                  console.error("❌ Error getting internal player:", error)
+                  retrySeekWithBackoff(data.seekTime)
+                }
+              } else {
+                // Player not ready, retry with exponential backoff
+                console.warn("⚠️ playerRef not ready, retrying...")
+                retrySeekWithBackoff(data.seekTime)
+              }
+              
+              // Helper function for retry logic
+              function retrySeekWithBackoff(seekTime: number) {
+                let retryCount = 0
+                const maxRetries = 5
+                const retrySeek = () => {
+                  retryCount++
+                  // Try stored ref first
+                  if (internalPlayerRef.current && lastSeekTimeRef.current === seekTime) {
+                    console.log("🔄 Retry seek with stored internal player (attempt", retryCount, ")")
+                    performSeekDirect(internalPlayerRef.current, seekTime)
+                    return
+                  }
+                  // Try ReactPlayer ref
+                  const retryPlayer = playerRef.current
+                  if (retryPlayer && typeof retryPlayer.getInternalPlayer === "function" && lastSeekTimeRef.current === seekTime) {
+                    try {
+                      const internalPlayer = retryPlayer.getInternalPlayer()
+                      if (internalPlayer) {
+                        internalPlayerRef.current = internalPlayer // Store it
+                        console.log("🔄 Retry seek with player (attempt", retryCount, ")")
+                        performSeekDirect(internalPlayer, seekTime)
+                        return
+                      }
+                    } catch (e) {
+                      // Continue to retry
+                    }
+                  }
+                  if (retryCount < maxRetries) {
+                    setTimeout(retrySeek, 100 * retryCount) // Exponential backoff: 100ms, 200ms, 300ms, etc.
+                  } else {
+                    console.error("❌ Failed to get player after", maxRetries, "retries")
+                    lastSeekTimeRef.current = null
+                  }
+                }
+                setTimeout(retrySeek, 100)
+              }
+            } else if (request && request.playerType === "MP4" && videoRef.current) {
+              console.log("Seeking MP4 player to:", data.seekTime)
+              videoRef.current.currentTime = data.seekTime
+              setCurrentTime(data.seekTime)
+              currentTimeRef.current = data.seekTime
+              // For MP4, seek is immediate, but wait a bit to ensure it's applied
+              setTimeout(() => {
+                if (lastSeekTimeRef.current === data.seekTime) {
+                  lastSeekTimeRef.current = null
+                }
+              }, 500)
+            }
+          }
+        }
+      } catch (error) {
+        // Only log actual errors, not missing seek requests
+        if (error instanceof Error && !error.message.includes("fetch")) {
+          console.error("Error checking for seek requests:", error)
+        }
+      }
+    }
+    
+    // Helper function to perform the actual seek (takes internal player directly)
+    const performSeekDirect = (internalPlayer: any, seekTime: number) => {
+      try {
+        console.log("🔍 Seek check - internalPlayer:", !!internalPlayer, "playerReady:", playerReadyRef.current)
+        const hasSeekTo = typeof internalPlayer.seekTo === "function"
+        console.log("🔍 Seek check - hasSeekTo:", hasSeekTo)
+        if (hasSeekTo) {
+          // Always try to seek, even if playerReady is false (it might work)
+          console.log("▶️ Attempting to seek YouTube player to:", seekTime)
+          try {
+            internalPlayer.seekTo(seekTime, true)
+            console.log("✅ seekTo() called successfully")
+            // Also update local state immediately for visual feedback
+            setCurrentTime(seekTime)
+            currentTimeRef.current = seekTime
+            // Don't clear the ref here - let onProgress detect when seek completes
+            // Set a fallback timeout in case seek never completes
+            setTimeout(() => {
+              if (lastSeekTimeRef.current === seekTime) {
+                console.warn("⏱️ Seek timeout - clearing seek ref after 5 seconds")
+                lastSeekTimeRef.current = null
+              }
+            }, 5000)
+          } catch (seekError) {
+            console.error("❌ Error calling seekTo():", seekError)
+            lastSeekTimeRef.current = null
+          }
+        } else {
+          console.warn("❌ YouTube player seekTo function not available")
+          lastSeekTimeRef.current = null
+        }
+      } catch (error) {
+        console.error("❌ Error seeking YouTube player:", error)
+        lastSeekTimeRef.current = null
+      }
+    }
+    
+    positionUpdateIntervalRef.current = setInterval(updatePosition, 1000)
+    seekCheckIntervalRef.current = setInterval(checkSeek, 500)
+
+    return () => {
+      if (positionUpdateIntervalRef.current) {
+        clearInterval(positionUpdateIntervalRef.current)
+      }
+      if (seekCheckIntervalRef.current) {
+        clearInterval(seekCheckIntervalRef.current)
+      }
+    }
+  }, [currentRequest, playerReady])
 
   // Check player state periodically
   useEffect(() => {
@@ -209,8 +565,7 @@ export default function PlayerClient({ streamerId }: PlayerClientProps) {
     if (currentRequest) {
       const videoIdToDelete = currentRequest.id
       
-      // Clear current request immediately
-      setCurrentRequest(null)
+      // Set loading but keep currentRequest until we have the next video
       setLoading(true)
       
       // Mark current request as complete and remove from queue
@@ -229,10 +584,40 @@ export default function PlayerClient({ streamerId }: PlayerClientProps) {
         console.error("Error completing request:", error)
       }
       
-      // Wait a bit for the deletion to complete, then fetch next video
-      setTimeout(() => {
-        fetchAndPlayNext()
-      }, 500)
+      // Fetch next video immediately - it will update currentRequest if found
+      // Only clear currentRequest if no new video is found
+      setTimeout(async () => {
+        try {
+          const token = window.location.pathname.split("/player/")[1]
+          const response = await fetch(`/api/queue/current-by-token?token=${token}`)
+          
+          if (response.ok) {
+            const data = await response.json()
+            if (data.currentRequest) {
+              // New video found, update state
+              setCurrentRequest(data.currentRequest)
+              currentRequestRef.current = data.currentRequest
+              setPlayerReady(false)
+              setIsPlaying(true)
+            } else {
+              // No more videos, clear current request
+              setCurrentRequest(null)
+              currentRequestRef.current = null
+              setLoading(false)
+            }
+          } else {
+            // Error fetching, clear current request
+            setCurrentRequest(null)
+            currentRequestRef.current = null
+            setLoading(false)
+          }
+        } catch (error) {
+          console.error("Error fetching next video:", error)
+          setCurrentRequest(null)
+          currentRequestRef.current = null
+          setLoading(false)
+        }
+      }, 300)
     }
   }
 
@@ -380,12 +765,26 @@ export default function PlayerClient({ streamerId }: PlayerClientProps) {
   useEffect(() => {
     if (currentRequest?.playerType === "MP4" && videoRef.current) {
       setIsPlaying(true)
+      // Set volume and muted state
+      videoRef.current.volume = volume
+      videoRef.current.muted = true // Start muted for autoplay
       // Try to play immediately
-      videoRef.current.play().catch((error) => {
+      videoRef.current.play().then(() => {
+        console.log("MP4 video autoplay started")
+        // Unmute after playback starts if volume > 0
+        if (volume > 0) {
+          setTimeout(() => {
+            if (videoRef.current) {
+              videoRef.current.muted = false
+            }
+          }, 100)
+        }
+      }).catch((error) => {
         console.error("Error autoplaying MP4 video:", error)
+        // Video will be handled by onLoadedData/onCanPlay handlers
       })
     }
-  }, [currentRequest])
+  }, [currentRequest, volume])
 
   if (loading && !currentRequest) {
     return (
@@ -417,13 +816,13 @@ export default function PlayerClient({ streamerId }: PlayerClientProps) {
         <div style={{ width: "100%", height: "100%", position: "relative" }}>
           {currentRequest.processedUrl ? (
             <>
-              {!playerReady && (
+              {loading && !playerReady && (
                 <div className="absolute inset-0 flex items-center justify-center bg-black z-10">
                   <p className="text-white">Loading player...</p>
                 </div>
               )}
               <ReactPlayer
-                ref={playerRef}
+                ref={playerRef as any}
                 key={currentRequest.id} // Force re-render when video changes
                 url={cleanYouTubeUrl(currentRequest.processedUrl)}
                 playing={isPlaying}
@@ -439,7 +838,22 @@ export default function PlayerClient({ streamerId }: PlayerClientProps) {
                   console.log("Playing URL:", currentRequest.processedUrl)
                   console.log("Volume:", volume)
                   setPlayerReady(true)
+                  playerReadyRef.current = true
+                  setLoading(false) // Clear loading when player is ready
                   setIsPlaying(true)
+                  
+                  // Store the internal player reference for seeking
+                  if (playerRef.current) {
+                    try {
+                      const internalPlayer = playerRef.current.getInternalPlayer()
+                      if (internalPlayer) {
+                        internalPlayerRef.current = internalPlayer
+                        console.log("✅ Internal player stored in ref")
+                      }
+                    } catch (error) {
+                      console.error("Error getting internal player:", error)
+                    }
+                  }
                   
                   // Force play and set volume
                   setTimeout(() => {
@@ -447,6 +861,11 @@ export default function PlayerClient({ streamerId }: PlayerClientProps) {
                       try {
                         const internalPlayer = playerRef.current.getInternalPlayer()
                         if (internalPlayer) {
+                          // Update ref if not already set
+                          if (!internalPlayerRef.current) {
+                            internalPlayerRef.current = internalPlayer
+                          }
+                          
                           // Force play
                           if (typeof internalPlayer.playVideo === "function") {
                             internalPlayer.playVideo()
@@ -485,6 +904,132 @@ export default function PlayerClient({ streamerId }: PlayerClientProps) {
                 onStart={() => {
                   console.log("ReactPlayer started")
                 }}
+                onDuration={(dur) => {
+                  // ReactPlayer's onDuration callback - most reliable way to get duration
+                  if (dur && dur > 0 && isFinite(dur)) {
+                    console.log("Duration from onDuration callback:", dur)
+                    setDuration(dur)
+                    durationRef.current = dur
+                    
+                    // Also send position update with duration immediately
+                    const token = window.location.pathname.split("/player/")[1]
+                    if (token) {
+                      // Use a small timeout to ensure currentTime is updated
+                      setTimeout(() => {
+                        const positionData = {
+                          token,
+                          currentTime: currentTime || 0,
+                          duration: dur,
+                          title: titleRef.current,
+                        }
+                        
+                        fetch("/api/player/position", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify(positionData),
+                        }).catch((error) => {
+                          console.error("Error sending duration update:", error)
+                        })
+                      }, 100)
+                    }
+                  }
+                }}
+                onProgress={(state) => {
+                  // Update position and duration from ReactPlayer's progress callback
+                  // This is more reliable than polling getCurrentTime()
+                  if (state.playedSeconds !== undefined && state.playedSeconds >= 0) {
+                    // Check if we're seeking
+                    if (lastSeekTimeRef.current !== null) {
+                      const seekTarget = lastSeekTimeRef.current
+                      const timeDifference = Math.abs(state.playedSeconds - seekTarget)
+                      if (timeDifference < 2) {
+                        // Seek completed
+                        console.log("Seek completed in onProgress. Target:", seekTarget, "Actual:", state.playedSeconds)
+                        lastSeekTimeRef.current = null
+                        setCurrentTime(state.playedSeconds)
+                    } else {
+                      // Still seeking - show seek target
+                      setCurrentTime(seekTarget)
+                      currentTimeRef.current = seekTarget
+                    }
+                  } else {
+                    // Not seeking - update normally
+                    setCurrentTime(state.playedSeconds)
+                    currentTimeRef.current = state.playedSeconds
+                  }
+                  }
+                  
+                  // Try to get duration from internal player as fallback
+                  let currentDuration = durationRef.current
+                  let currentTitle = titleRef.current
+                  
+                  try {
+                    const internalPlayer = playerRef.current?.getInternalPlayer()
+                    if (internalPlayer) {
+                      // Try to get duration
+                      if (typeof internalPlayer.getDuration === "function") {
+                        const playerDuration = internalPlayer.getDuration()
+                        if (playerDuration > 0 && isFinite(playerDuration)) {
+                          currentDuration = playerDuration
+                          if (currentDuration !== durationRef.current) {
+                            durationRef.current = currentDuration
+                            setDuration(currentDuration)
+                            console.log("Duration from internal player:", currentDuration)
+                          }
+                        }
+                      }
+                      
+                      // Try to get title
+                      if (typeof internalPlayer.getVideoData === "function") {
+                        try {
+                          const videoData = internalPlayer.getVideoData()
+                          if (videoData && videoData.title) {
+                            currentTitle = videoData.title
+                            if (currentTitle !== titleRef.current) {
+                              titleRef.current = currentTitle
+                              setTitle(currentTitle)
+                            }
+                          }
+                        } catch (e) {
+                          // getVideoData might throw, ignore
+                        }
+                      }
+                    }
+                  } catch (error) {
+                    // Ignore errors
+                  }
+                  
+                  // Send position update immediately when progress updates
+                  // Use refs to get latest values (avoid stale closure)
+                  const token = window.location.pathname.split("/player/")[1]
+                  if (token && state.playedSeconds !== undefined) {
+                    // Use seek target if we're seeking, otherwise use actual position
+                    const timeToSend = lastSeekTimeRef.current !== null 
+                      ? lastSeekTimeRef.current 
+                      : (state.playedSeconds || 0)
+                    
+                    const positionData = {
+                      token,
+                      currentTime: timeToSend,
+                      duration: currentDuration || 0,
+                      title: currentTitle,
+                    }
+                    
+                    // Send position update (throttle to avoid too many requests)
+                    // Only send every 0.5 seconds max
+                    const now = Date.now()
+                    if (now - lastPositionUpdateRef.current > 500) {
+                      lastPositionUpdateRef.current = now
+                      fetch("/api/player/position", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(positionData),
+                      }).catch((error) => {
+                        console.error("Error sending position update from onProgress:", error)
+                      })
+                    }
+                  }
+                }}
                 config={{
                   youtube: {
                     playerVars: {
@@ -498,16 +1043,6 @@ export default function PlayerClient({ streamerId }: PlayerClientProps) {
                   },
                 }}
               />
-              {/* Debug info - remove in production */}
-              {process.env.NODE_ENV === "development" && (
-                <div style={{ position: "absolute", top: 0, left: 0, background: "rgba(0,0,0,0.7)", color: "white", padding: "4px", fontSize: "10px", zIndex: 1000 }}>
-                  URL: {currentRequest.processedUrl}
-                  <br />
-                  Ready: {playerReady ? "Yes" : "No"}
-                  <br />
-                  Playing: {isPlaying ? "Yes" : "No"}
-                </div>
-              )}
             </>
           ) : (
             <div className="text-white flex items-center justify-center h-full">
@@ -521,34 +1056,97 @@ export default function PlayerClient({ streamerId }: PlayerClientProps) {
         ref={videoRef}
         src={currentRequest.processedUrl}
         autoPlay
-        muted={volume === 0}
+        muted={true} // Start muted for autoplay to work (browsers require this)
         playsInline
         className="w-full h-full object-contain"
         onEnded={handleVideoEnd}
         onPlay={() => {
           console.log("Video playing")
           setIsPlaying(true)
+          // Unmute after playback starts (autoplay requires muted initially)
+          if (videoRef.current && volume > 0) {
+            videoRef.current.muted = false
+          }
         }}
         onPause={() => {
           console.log("Video paused")
           setIsPlaying(false)
         }}
+        onLoadedMetadata={() => {
+          console.log("Video metadata loaded")
+          if (videoRef.current && videoRef.current.duration) {
+            setDuration(videoRef.current.duration)
+            console.log("Duration set:", videoRef.current.duration)
+          }
+        }}
         onLoadedData={() => {
           console.log("Video loaded, attempting to play")
+          setLoading(false) // Clear loading when video is loaded
           // Force play when video is loaded
           if (videoRef.current) {
-            videoRef.current.play().catch((error) => {
+            if (videoRef.current.duration) {
+              setDuration(videoRef.current.duration)
+            }
+            // Set volume before playing
+            videoRef.current.volume = volume
+            videoRef.current.play().then(() => {
+              console.log("Video autoplay started successfully")
+              setIsPlaying(true)
+              // Unmute if volume > 0
+              const video = videoRef.current
+              if (video && volume > 0) {
+                video.muted = false
+              }
+            }).catch((error) => {
               console.error("Error autoplaying video:", error)
+              // If autoplay fails, try with muted
+              if (videoRef.current) {
+                videoRef.current.muted = true
+                videoRef.current.play().then(() => {
+                  console.log("Video autoplay started with muted")
+                  setIsPlaying(true)
+                  // Unmute after a short delay
+                  const video = videoRef.current
+                  if (video) {
+                    setTimeout(() => {
+                      if (videoRef.current && volume > 0) {
+                        videoRef.current.muted = false
+                      }
+                    }, 100)
+                  }
+                }).catch((err) => {
+                  console.error("Error autoplaying even with muted:", err)
+                })
+              }
             })
-            setIsPlaying(true)
           }
         }}
         onCanPlay={() => {
+          console.log("Video can play")
+          setLoading(false) // Clear loading when video can play
           // Also try to play when video can play
-          if (videoRef.current && isPlaying) {
-            videoRef.current.play().catch((error) => {
+          if (videoRef.current && isPlaying && videoRef.current.paused) {
+            if (videoRef.current.duration) {
+              setDuration(videoRef.current.duration)
+            }
+            // Set volume before playing
+            videoRef.current.volume = volume
+            videoRef.current.play().then(() => {
+              console.log("Video started playing on canPlay")
+              // Unmute if volume > 0
+              const video = videoRef.current
+              if (video && volume > 0) {
+                video.muted = false
+              }
+            }).catch((error) => {
               console.error("Error playing video on canPlay:", error)
             })
+          }
+        }}
+        onDurationChange={() => {
+          if (videoRef.current && videoRef.current.duration) {
+            setDuration(videoRef.current.duration)
+            console.log("Duration changed:", videoRef.current.duration)
           }
         }}
         onError={(e) => {

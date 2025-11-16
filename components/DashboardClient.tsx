@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { useSession, signOut } from "next-auth/react"
 import { getBotInstance } from "@/lib/twitch-bot"
 import { useQueueStore } from "@/store/queue-store"
@@ -21,9 +21,25 @@ export default function DashboardClient({ user }: DashboardClientProps) {
   const [playerPaused, setPlayerPaused] = useState(false)
   const [playerVolume, setPlayerVolume] = useState(0.0)
   const [currentPlaying, setCurrentPlaying] = useState<{ id: string; originalUrl: string; requestedBy: string } | null>(null)
+  const [currentTime, setCurrentTime] = useState(0)
+  const [duration, setDuration] = useState(0)
+  const [videoTitle, setVideoTitle] = useState<string | null>(null)
+  const [isSeeking, setIsSeeking] = useState(false)
+  const [seekPosition, setSeekPosition] = useState<number | null>(null)
+  const seekTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const volumeDebounceRef = useRef<NodeJS.Timeout | null>(null)
   const { requests, fetchRequests, skipRequest, removeRequest } = useQueueStore()
 
   const [playerUrl, setPlayerUrl] = useState("")
+
+  // Cleanup debounce timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (volumeDebounceRef.current) {
+        clearTimeout(volumeDebounceRef.current)
+      }
+    }
+  }, [])
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -63,6 +79,67 @@ export default function DashboardClient({ user }: DashboardClientProps) {
     return () => clearInterval(interval)
   }, [])
 
+  // Fetch video position (current time, duration, title) periodically
+  useEffect(() => {
+    if (!currentPlaying) {
+      setCurrentTime(0)
+      setDuration(0)
+      setVideoTitle(null)
+      return
+    }
+
+    const fetchPosition = async () => {
+      try {
+        const response = await fetch("/api/player/position")
+        if (response.ok) {
+          const data = await response.json()
+          const apiCurrentTime = data.currentTime || 0
+          
+          // If we're seeking, check if the seek has completed
+          if (isSeeking && seekPosition !== null) {
+            const timeDifference = Math.abs(apiCurrentTime - seekPosition)
+            // If the position is within 2 seconds of where we seeked, the seek completed
+            if (timeDifference < 2) {
+              // Seek completed - clear seeking state and update position
+              console.log("Dashboard: Seek completed. Target:", seekPosition, "Actual:", apiCurrentTime)
+              setIsSeeking(false)
+              setSeekPosition(null)
+              if (seekTimeoutRef.current) {
+                clearTimeout(seekTimeoutRef.current)
+              }
+              // Update position data now that seek is complete
+              setCurrentTime(apiCurrentTime)
+              setDuration(data.duration || 0)
+              setVideoTitle(data.title || null)
+            } else {
+              // Still seeking - keep showing seek position, but update other data
+              // Don't update currentTime - keep showing seekPosition
+              setDuration(data.duration || 0)
+              setVideoTitle(data.title || null)
+              // currentTime is already set to seekPosition, don't change it
+            }
+          } else {
+            // Not seeking - update position data normally
+            setCurrentTime(apiCurrentTime)
+            setDuration(data.duration || 0)
+            setVideoTitle(data.title || null)
+          }
+        }
+      } catch (error) {
+        console.error("Error fetching position:", error)
+      }
+    }
+
+    fetchPosition()
+    const interval = setInterval(fetchPosition, 1000) // Update every second
+    return () => {
+      clearInterval(interval)
+      if (seekTimeoutRef.current) {
+        clearTimeout(seekTimeoutRef.current)
+      }
+    }
+  }, [currentPlaying, isSeeking, seekPosition])
+
   const handleConnectBot = useCallback(async () => {
     if (botConnected) {
       const bot = getBotInstance()
@@ -97,8 +174,8 @@ export default function DashboardClient({ user }: DashboardClientProps) {
         }
       })
 
-      bot.onCommand(async ({ command }) => {
-        // Handle pause/play commands from moderators/broadcaster
+      bot.onCommand(async ({ command, args }) => {
+        // Handle commands from moderators/broadcaster
         try {
           if (command === "pause" || command === "play") {
             const shouldPause = command === "pause"
@@ -116,6 +193,18 @@ export default function DashboardClient({ user }: DashboardClientProps) {
             if (response.ok) {
               const data = await response.json()
               setPlayerPaused(data.paused)
+            }
+          } else if (command === "volume" && args && args.length > 0) {
+            // Handle volume command: !mrvol 0-100
+            const volumePercent = parseInt(args[0], 10)
+            if (!isNaN(volumePercent) && volumePercent >= 0 && volumePercent <= 100) {
+              const volume = volumePercent / 100 // Convert to 0-1 range
+              await handleVolumeChange(volume)
+            }
+          } else if (command === "skip") {
+            // Handle skip command: !mrskip
+            if (currentPlaying) {
+              await handleSkipCurrent()
             }
           }
         } catch (error) {
@@ -240,20 +329,84 @@ export default function DashboardClient({ user }: DashboardClientProps) {
   }, [user.playerToken])
 
   const handleVolumeChange = async (newVolume: number) => {
+    // Update local state immediately for visual feedback
+    setPlayerVolume(newVolume)
+    
+    // Clear existing debounce timeout
+    if (volumeDebounceRef.current) {
+      clearTimeout(volumeDebounceRef.current)
+    }
+    
+    // Debounce the API call - only send after user stops sliding for 300ms
+    volumeDebounceRef.current = setTimeout(async () => {
+      try {
+        const response = await fetch("/api/player/volume", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ volume: newVolume }),
+        })
+        
+        if (response.ok) {
+          const data = await response.json()
+          // Only update if the server returned a different value (shouldn't happen, but just in case)
+          if (data.volume !== undefined) {
+            setPlayerVolume(data.volume)
+          }
+        }
+      } catch (error) {
+        console.error("Error setting volume:", error)
+      }
+    }, 300)
+  }
+
+  const handleSeek = async (newTime: number) => {
+    if (!currentPlaying || duration === 0) return
+    
+    // Store the seek position and set seeking state
+    setSeekPosition(newTime)
+    setIsSeeking(true)
+    setCurrentTime(newTime) // Update visual position immediately
+    
+    // Clear any existing timeout
+    if (seekTimeoutRef.current) {
+      clearTimeout(seekTimeoutRef.current)
+    }
+    
     try {
-      const response = await fetch("/api/player/volume", {
+      const response = await fetch("/api/player/seek", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ volume: newVolume }),
+        body: JSON.stringify({ time: newTime }),
       })
       
       if (response.ok) {
-        const data = await response.json()
-        setPlayerVolume(data.volume)
+        console.log("✅ Seek request sent successfully to:", newTime)
+        // Don't clear seeking state here - let the position polling detect when seek completes
+        // Set a fallback timeout in case the seek never completes (shouldn't happen)
+        seekTimeoutRef.current = setTimeout(() => {
+          console.warn("⏱️ Seek timeout - clearing seeking state after 5 seconds")
+          setIsSeeking(false)
+          setSeekPosition(null)
+        }, 5000) // 5 seconds fallback timeout
+      } else {
+        // If seek failed, clear seeking state immediately
+        const errorData = await response.json().catch(() => ({}))
+        console.error("Seek request failed:", errorData)
+        setIsSeeking(false)
+        setSeekPosition(null)
       }
     } catch (error) {
-      console.error("Error setting volume:", error)
+      console.error("Error seeking:", error)
+      setIsSeeking(false)
+      setSeekPosition(null)
     }
+  }
+
+  const formatTime = (seconds: number): string => {
+    if (!isFinite(seconds) || isNaN(seconds)) return "0:00"
+    const mins = Math.floor(seconds / 60)
+    const secs = Math.floor(seconds % 60)
+    return `${mins}:${secs.toString().padStart(2, "0")}`
   }
 
   const handleSkipCurrent = async () => {
@@ -299,6 +452,37 @@ export default function DashboardClient({ user }: DashboardClientProps) {
       }, 300)
     } catch (error) {
       console.error("Error skipping current video:", error)
+    }
+  }
+
+  const handleClearQueue = async () => {
+    // Show confirmation dialog
+    const confirmed = window.confirm(
+      "Are you sure you want to clear the entire queue? This will remove all pending videos and stop the currently playing video."
+    )
+    
+    if (!confirmed) {
+      return
+    }
+    
+    try {
+      const response = await fetch("/api/queue/clear", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      })
+      
+      if (response.ok) {
+        // Clear current playing
+        setCurrentPlaying(null)
+        // Refresh the queue
+        fetchRequests()
+      } else {
+        console.error("Failed to clear queue")
+        alert("Failed to clear queue. Please try again.")
+      }
+    } catch (error) {
+      console.error("Error clearing queue:", error)
+      alert("Error clearing queue. Please try again.")
     }
   }
 
@@ -412,6 +596,36 @@ export default function DashboardClient({ user }: DashboardClientProps) {
                 Player Controls
               </h2>
               
+              {/* Seek Bar - Above Volume */}
+              {currentPlaying && (
+                <div className="mb-6">
+                  {videoTitle && (
+                    <p className="text-sm text-text-light mb-2 truncate" title={videoTitle}>
+                      {videoTitle}
+                    </p>
+                  )}
+                  <div className="flex items-center gap-3">
+                    <span className="text-text-gray text-xs w-12 text-left">
+                      {formatTime(currentTime)}
+                    </span>
+                    <input
+                      type="range"
+                      min="0"
+                      max={duration || 100}
+                      step="0.1"
+                      value={currentTime}
+                      disabled={true}
+                      readOnly={true}
+                      className="flex-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                      style={{ pointerEvents: "none" }}
+                    />
+                    <span className="text-text-gray text-xs w-12 text-right">
+                      {duration > 0 ? formatTime(duration) : "--:--"}
+                    </span>
+                  </div>
+                </div>
+              )}
+              
               {/* Volume - Full Width */}
               <div className="mb-6">
                 <label className="block text-sm font-medium text-text-light mb-3">
@@ -495,9 +709,19 @@ export default function DashboardClient({ user }: DashboardClientProps) {
           </div>
 
           <div className="card p-6">
-            <h2 className="text-xl font-semibold text-text-light mb-4">
-              Queue ({requests.length})
-            </h2>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-xl font-semibold text-text-light">
+                Queue ({requests.length})
+              </h2>
+              {requests.length > 0 && (
+                <button
+                  onClick={handleClearQueue}
+                  className="px-4 py-2 text-sm bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors"
+                >
+                  Clear Queue
+                </button>
+              )}
+            </div>
             {requests.length === 0 ? (
               <p className="text-text-gray text-center py-8">
                 No pending requests. Viewers can use !mr [url] in your chat.

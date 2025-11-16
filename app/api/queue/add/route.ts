@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
-import { getDirectVideoUrl, isYouTubeUrl } from "@/lib/video-scraper"
+import { isValidVideoUrl, getPlayerType } from "@/lib/video-scraper"
 import { z } from "zod"
 
 const addRequestSchema = z.object({
@@ -26,27 +26,21 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    let processedUrl: string
-    let playerType: "YOUTUBE" | "MP4"
-
-    if (isYouTubeUrl(url)) {
-      // YouTube URLs are used directly
-      processedUrl = url
-      playerType = "YOUTUBE"
-    } else {
-      // Try to scrape direct video URL for other platforms
-      const directUrl = await getDirectVideoUrl(url)
-      
-      if (!directUrl) {
-        return NextResponse.json(
-          { error: "Video source not supported or could not be processed" },
-          { status: 400 }
-        )
-      }
-
-      processedUrl = directUrl
-      playerType = "MP4"
+    // Validate URL is from a whitelisted service
+    if (!isValidVideoUrl(url)) {
+      return NextResponse.json(
+        { error: "Video source not supported. Supported services: YouTube, Streamable, Twitch, Twitter, Nuuls, Instagram Reels, TikTok" },
+        { status: 400 }
+      )
     }
+
+    // Determine player type
+    const playerType = getPlayerType(url)
+    
+    // For YouTube, store the URL directly (it doesn't expire)
+    // For other services, we'll extract the MP4 URL on-demand when playing
+    // Store originalUrl as processedUrl for now (will be replaced on-demand for non-YouTube)
+    const processedUrl = url
 
     // Create the media request
     const mediaRequest = await prisma.mediaRequest.create({

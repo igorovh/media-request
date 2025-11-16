@@ -8,8 +8,9 @@ export interface BotMessage {
 
 export interface BotCommand {
   username: string
-  command: "pause" | "play"
+  command: "pause" | "play" | "volume" | "skip"
   tags: any
+  args?: string[] // For commands with arguments like !mrvol 50
 }
 
 export class TwitchBot {
@@ -74,6 +75,39 @@ export class TwitchBot {
             this.onCommandCallback({
               username,
               command: "play",
+              tags,
+            })
+          }
+        }
+        return
+      }
+
+      // Check for !mrvol command (volume 0-100)
+      const volMatch = message.match(/^!mrvol\s+(\d+)$/i)
+      if (volMatch) {
+        if (this.isModeratorOrBroadcaster(tags, username)) {
+          const volume = parseInt(volMatch[1], 10)
+          if (volume >= 0 && volume <= 100) {
+            if (this.onCommandCallback) {
+              this.onCommandCallback({
+                username,
+                command: "volume",
+                tags,
+                args: [volume.toString()],
+              })
+            }
+          }
+        }
+        return
+      }
+
+      // Check for !mrskip command
+      if (message.match(/^!mrskip$/i)) {
+        if (this.isModeratorOrBroadcaster(tags, username)) {
+          if (this.onCommandCallback) {
+            this.onCommandCallback({
+              username,
+              command: "skip",
               tags,
             })
           }

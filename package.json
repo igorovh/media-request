@@ -20,7 +20,6 @@
     "prisma": "^5.19.0",
     "tmi.js": "^1.8.5",
     "react-player": "^2.16.0",
-    "youtube-dl-exec": "^2.4.8",
     "zustand": "^4.5.5",
     "zod": "^3.23.8",
     "bcryptjs": "^2.4.3",

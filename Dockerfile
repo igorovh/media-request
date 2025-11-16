@@ -1,8 +1,6 @@
 # Stage 1: Dependencies
 FROM node:20-alpine AS deps
 RUN apk add --no-cache libc6-compat python3 make g++ ffmpeg py3-pip
-# Install yt-dlp in deps stage as well for build-time if needed
-RUN pip3 install --no-cache-dir --break-system-packages yt-dlp || true
 WORKDIR /app
 
 # Copy package files
@@ -37,11 +35,9 @@ ENV NEXT_TELEMETRY_DISABLED 1
 RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nextjs
 
-# Install runtime dependencies for youtube-dl-exec and Prisma
+# Install runtime dependencies for Prisma
 # openssl is required for Prisma on Alpine Linux
 RUN apk add --no-cache python3 py3-pip ffmpeg openssl
-# Use --break-system-packages since this is a containerized environment
-RUN pip3 install --no-cache-dir --break-system-packages yt-dlp
 
 # Copy necessary files from builder
 # Note: public files are automatically included in .next/standalone by Next.js
